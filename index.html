@@ -216,6 +216,7 @@
   .valsub:hover{color:var(--text);border-color:var(--accent);}
   .valsub.active{background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;border-color:transparent;box-shadow:0 3px 10px rgba(59,130,246,.35);}
   .valsec{font-weight:700;color:#bae6fd;margin:14px 0 4px;font-size:12.5px;}
+  .snpot-tag{display:inline-block;font-size:9.5px;font-weight:800;background:#a16207;color:#fde68a;border-radius:8px;padding:1px 6px;margin-left:4px;letter-spacing:.3px;}
   table.valtbl tr.valtot td{background:#1b2740;font-weight:800;color:#e2e8f0;}
   .verdict{font-weight:800;font-size:14px;padding:8px 12px;border-radius:8px;margin:4px 0 10px;display:inline-block;}
   .verdict.ok{background:#13251a;color:#86efac;border:1px solid #166534;}
@@ -626,6 +627,12 @@ function findExistingSheet(company){
   return hit?STATE.existing[hit]:null;
 }
 
+/* employee + ACTUAL DATE key (for "already reviewed this date" skip on merge) */
+function empDateKey(vals, roles){
+  const emp=String(valByHeader(vals, roles.emp||'EMPLOYEE ID')||'').trim() || ('NM:'+String(valByHeader(vals, roles.name||'NAME')||'').trim());
+  const dact=String(valByHeader(vals, roles.dact||'')||'').trim();
+  return dact ? emp+'||'+dact : null;
+}
 function buildCompany(company){
   const parsed=STATE.rawParsed[company];
   const exist=findExistingSheet(company);
@@ -637,7 +644,7 @@ function buildCompany(company){
   STATE.canonical[company]={headers:canonHeaders, roles, titleRows};
 
   const otH=hdrName(canonHeaders,'OT TIME'), npH=hdrName(canonHeaders,'NPOT'), stH=hdrName(canonHeaders,'STATUS');
-  const out=[]; const seen={};
+  const out=[]; const seen={}; const reviewedDates=new Set(); let skipped=0;
 
   // 1) carry all existing rows (preserve everything)
   if(exist){
@@ -646,6 +653,7 @@ function buildCompany(company){
       const key=mkKey(vals,roles);
       out.push({vals, origin:'kept', key, needfill:false, proseflag:false});
       seen[key]=true;
+      if(String(vals[stH]||'').trim()){ const edk=empDateKey(vals,roles); if(edk) reviewedDates.add(edk); }
     });
   }
 
@@ -655,6 +663,8 @@ function buildCompany(company){
       const vals={}; canonHeaders.forEach(h=>{ vals[h]=valByHeader(v,h); });
       const key=mkKey(vals,roles);
       if(seen[key]) return;
+      const edk=empDateKey(vals,roles);
+      if(edk && reviewedDates.has(edk)){ skipped++; return; }  // same employee+date already reviewed (STATUS set) -> don't re-insert
       const name=valByHeader(vals,roles.name||'NAME');
       const reason=valByHeader(vals,roles.reason||'REASON');
       const manual=isManualFill(name);
@@ -673,9 +683,11 @@ function buildCompany(company){
   const nameH=roles.name||'NAME';
   out.sort((a,b)=> String(valByHeader(a.vals,nameH)).localeCompare(String(valByHeader(b.vals,nameH))));
   STATE.data[company]=out;
+  STATE._mergeSkipped=(STATE._mergeSkipped||0)+skipped;
 }
 
 function processAll(){
+  STATE._mergeSkipped=0;
   ['INFOSOFT','ACCELTECH'].forEach(co=>{ if(STATE.rawParsed[co]||findExistingSheet(co)) buildCompany(co); else STATE.data[co]=[]; });
 }
 
@@ -715,6 +727,7 @@ $('#processBtn').addEventListener('click',()=>{
   renderReview(); saveSession(true);
   $('#reviewCard').classList.remove('hidden');
   $('#reviewCard').scrollIntoView({behavior:'smooth'});
+  if(STATE._mergeSkipped) toast('Skipped '+STATE._mergeSkipped+' entr'+(STATE._mergeSkipped===1?'y':'ies')+' — date already reviewed for that employee');
 });
 
 /* Append only NEW entries from freshly uploaded raw into the current in-memory session */
@@ -722,7 +735,7 @@ function mergeNewRaw(){
   const haveSession=STATE.data.INFOSOFT.length||STATE.data.ACCELTECH.length;
   if(!haveSession){ toast('No open session to add into — use "Generate report →" first (or resume a saved session)',true); return; }
   if(!STATE.rawParsed.INFOSOFT && !STATE.rawParsed.ACCELTECH){ toast('Upload the new raw approvals file(s) first',true); return; }
-  let added=0;
+  let added=0, skipped=0;
   ['INFOSOFT','ACCELTECH'].forEach(co=>{
     const parsed=STATE.rawParsed[co]; if(!parsed) return;
     let canon=STATE.canonical[co];
@@ -731,11 +744,15 @@ function mergeNewRaw(){
     }
     const roles=canon.roles;
     const otH=hdrName(canon.headers,'OT TIME'), npH=hdrName(canon.headers,'NPOT'), stH=hdrName(canon.headers,'STATUS');
-    const seen={}; STATE.data[co].forEach(r=>{ seen[mkKey(r.vals,roles)]=true; });
+    const seen={}; const reviewedDates=new Set();
+    STATE.data[co].forEach(r=>{ seen[mkKey(r.vals,roles)]=true;
+      if(String(r.vals[stH]||'').trim()){ const edk=empDateKey(r.vals,roles); if(edk) reviewedDates.add(edk); } });
     parsed.rows.forEach(v=>{
       const vals={}; canon.headers.forEach(h=>{ vals[h]=valByHeader(v,h); });
       const key=mkKey(vals,roles);
       if(seen[key]) return;
+      const edk=empDateKey(vals,roles);
+      if(edk && reviewedDates.has(edk)){ skipped++; return; }  // date already reviewed (STATUS set) for this employee -> skip
       const name=valByHeader(vals,roles.name||'NAME');
       const reason=valByHeader(vals,roles.reason||'REASON');
       const manual=isManualFill(name);
@@ -754,7 +771,7 @@ function mergeNewRaw(){
   renderReview(); saveSession(true);
   $('#reviewCard').classList.remove('hidden');
   $('#reviewCard').scrollIntoView({behavior:'smooth'});
-  toast(added?(added+' new entr'+(added===1?'y':'ies')+' added to the session'):'No new entries found — all are already in the session');
+  toast((added?(added+' new entr'+(added===1?'y':'ies')+' added'):'No new entries found')+(skipped?' · skipped '+skipped+' already-reviewed date'+(skipped===1?'':'s'):''));
 }
 $('#mergeBtn').addEventListener('click', mergeNewRaw);
 
@@ -1021,13 +1038,15 @@ function validateCore(recs, tsEmployees, holidays){
   recs.forEach(r=>{
     if(r.appstat && !/APPROVED/i.test(String(r.appstat))) return;
     if(r.date && !valParseDate(r.date)) badDates++;
-    const dt=classifyDayType(r.date, holidays);
+    const straight=/straight\s*npot/i.test(String(r.status||''));
+    let dt=classifyDayType(r.date, holidays);
+    if(straight) dt='RST';   // manual "straight NPOT" -> rest-day; hours post to BOTH RSTHRS and RSTOT (2x), plus RSTNPOT
     let id=String(r.id||'').trim(); let blank=false;
     if(!id){ id='BLANK:'+(r.name||''); blank=true; }
-    if(!agg[id]) agg[id]={REG:{h:0,np:0,n:0},RST:{h:0,np:0,n:0},LGL:{h:0,np:0,n:0},SPL:{h:0,np:0,n:0},name:r.name,blank};
+    if(!agg[id]) agg[id]={REG:{h:0,hd:0,np:0,n:0,snpot:false},RST:{h:0,hd:0,np:0,n:0,snpot:false},LGL:{h:0,hd:0,np:0,n:0,snpot:false},SPL:{h:0,hd:0,np:0,n:0,snpot:false},name:r.name,blank};
     const hh=valHours(r.hrs), nn=tsNum(r.npot);
-    agg[id][dt].h+=hh; agg[id][dt].np+=nn; agg[id][dt].n++;
-    entries.push({id:blank?'(blank)':id, name:r.name, date:r.date, hrs:hh, npot:nn, daytype:dt, blank});
+    const cell=agg[id][dt]; cell.h+=hh; cell.hd+=(straight?2*hh:hh); cell.np+=nn; cell.n++; if(straight)cell.snpot=true;
+    entries.push({id:blank?'(blank)':id, name:r.name, date:r.date, hrs:hh, npot:nn, daytype:dt, blank, snpot:straight});
   });
   const results=[]; const checkIds=new Set();
   const B={REG:['REGHRSOT',null,'REGNPOT'], RST:['RSTHRS','RSTOT','RSTNPOT'], LGL:['LGLHRS','LGLHRSOT','LGLNPOT'], SPL:['SPLHRS','SPLHRSOT','SPLNPOT']};
@@ -1035,12 +1054,12 @@ function validateCore(recs, tsEmployees, holidays){
   ids.forEach(id=>{
     const a=agg[id]; const t=(tsEmployees&&tsEmployees[id])||{};
     ['REG','RST','LGL','SPL'].forEach(dt=>{
-      const fh=a?a[dt].h:0, fnp=a?a[dt].np:0, fn=a?a[dt].n:0;
+      const fh=a?a[dt].h:0, fhd=a?a[dt].hd:0, fnp=a?a[dt].np:0, fn=a?a[dt].n:0, snpot=a?a[dt].snpot:false;
       let th,tnp,b1=0,b2=0;
       if(dt==='REG'){ b1=t.REGHRSOT||0; th=b1; tnp=t.REGNPOT||0; }
       else { const [c1,c2,cnp]=B[dt]; b1=t[c1]||0; b2=t[c2]||0; th=b1+b2; tnp=t[cnp]||0; }
       if(fh===0&&fnp===0&&th===0&&tnp===0) return;
-      const ok=Math.abs(th-fh)<VTOL && Math.abs(tnp-fnp)<VTOL;
+      const ok=Math.abs(th-fhd)<VTOL && Math.abs(tnp-fnp)<VTOL;   // fhd doubles straight-NPOT hours (posts to RSTHRS + RSTOT)
       let cause='';
       if(!ok){
         if(a&&a.blank) cause='Blank EMPLOYEE ID in report — fix the ID';
@@ -1050,9 +1069,9 @@ function validateCore(recs, tsEmployees, holidays){
         checkIds.add(id);
       }
       results.push({id, name:(a&&a.name)||t.name||'', daytype:dt, entries:fn,
-        fileHrs:+fh.toFixed(2), b1:+b1.toFixed(2), b2:+b2.toFixed(2), tsHrs:+th.toFixed(2), diffHrs:+(th-fh).toFixed(2),
+        fileHrs:+fh.toFixed(2), b1:+b1.toFixed(2), b2:+b2.toFixed(2), tsHrs:+th.toFixed(2), diffHrs:+(th-fhd).toFixed(2),
         fileNpot:+fnp.toFixed(2), tsNpot:+tnp.toFixed(2), diffNpot:+(tnp-fnp).toFixed(2),
-        result:ok?'MATCH':'CHECK', cause});
+        result:ok?'MATCH':'CHECK', cause, snpot, expected:+fhd.toFixed(2)});
     });
   });
   return {results, checkIds, entries, badDates};
@@ -1094,12 +1113,13 @@ async function parseTimesheet(file){
 function recsForCompany(co){
   const canon=STATE.canonical[co]; if(!canon) return [];
   const roles=canon.roles;
-  const empH=roles.emp||'EMPLOYEE ID', nameH=roles.name||'NAME', dactH=roles.dact, appotH=roles.appot||'APPROVED OT.', npH=hdrName(canon.headers,'NPOT');
+  const empH=roles.emp||'EMPLOYEE ID', nameH=roles.name||'NAME', dactH=roles.dact, appotH=roles.appot||'APPROVED OT.', npH=hdrName(canon.headers,'NPOT'), stH=hdrName(canon.headers,'STATUS');
   const appstatH=canon.headers.find(h=>normHdr(h).includes('APPLICATION STATUS'));
   return STATE.data[co].map(r=>({
     id:String(valByHeader(r.vals,empH)||'').trim(), name:valByHeader(r.vals,nameH),
     appstat:appstatH?valByHeader(r.vals,appstatH):'APPROVED',
-    hrs:valByHeader(r.vals,appotH), npot:r.vals[npH], date:dactH?valByHeader(r.vals,dactH):''
+    hrs:valByHeader(r.vals,appotH), npot:r.vals[npH], date:dactH?valByHeader(r.vals,dactH):'',
+    status:valByHeader(r.vals,stH)
   }));
 }
 
@@ -1131,6 +1151,7 @@ function allHolidays(){ return STATE.holidays.concat(STATE.autoHolidays||[]); }
 function weekdayOtByDate(co){
   const byDate={};
   recsForCompany(co).forEach(r=>{ if(r.appstat && !/APPROVED/i.test(String(r.appstat))) return;
+    if(/straight\s*npot/i.test(String(r.status||''))) return;   // rest-day-posted, not a holiday signal
     const d=valParseDate(r.date); if(!d) return; const w=d.getDay(); if(w===0||w===6) return;
     const iso=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
     byDate[iso]=(byDate[iso]||0)+valHours(r.hrs); });
@@ -1190,7 +1211,7 @@ function vHolSection(title, rows, labels){
   h+=`<table class="valtbl"><thead><tr><th>EMPLOYEE ID</th><th>NAME</th><th>APPROVED OT (FILE)</th><th>${labels[0]}</th><th>${labels[1]}</th><th>TS TOTAL</th><th>DIFF OT</th><th>NPOT (FILE)</th><th>${labels[2]}</th><th>DIFF NPOT</th><th>RESULT</th></tr></thead><tbody>`;
   let tFh=0,tB1=0,tB2=0,tT=0,tFn=0,tNp=0;
   rows.forEach(r=>{ tFh+=r.fileHrs;tB1+=r.b1;tB2+=r.b2;tT+=r.tsHrs;tFn+=r.fileNpot;tNp+=r.tsNpot;
-    h+=`<tr class="${r.result==='CHECK'?'chk':''}"><td>${esc(r.id)}</td><td>${esc(r.name)}</td><td>${r.fileHrs.toFixed(2)}</td><td>${r.b1.toFixed(2)}</td><td>${r.b2.toFixed(2)}</td><td>${r.tsHrs.toFixed(2)}</td><td>${vFmtDiff(r.diffHrs)}</td><td>${r.fileNpot.toFixed(2)}</td><td>${r.tsNpot.toFixed(2)}</td><td>${vFmtDiff(r.diffNpot)}</td><td class="rescell ${r.result==='MATCH'?'match':'check'}">${r.result}</td></tr>`; });
+    h+=`<tr class="${r.result==='CHECK'?'chk':''}"><td>${esc(r.id)}</td><td>${esc(r.name)}${r.snpot?' <span class="snpot-tag">×2 straight NPOT</span>':''}</td><td>${r.fileHrs.toFixed(2)}</td><td>${r.b1.toFixed(2)}</td><td>${r.b2.toFixed(2)}</td><td>${r.tsHrs.toFixed(2)}</td><td>${vFmtDiff(r.diffHrs)}</td><td>${r.fileNpot.toFixed(2)}</td><td>${r.tsNpot.toFixed(2)}</td><td>${vFmtDiff(r.diffNpot)}</td><td class="rescell ${r.result==='MATCH'?'match':'check'}">${r.result}</td></tr>`; });
   h+=`<tr class="valtot"><td></td><td>TOTAL</td><td>${tFh.toFixed(2)}</td><td>${tB1.toFixed(2)}</td><td>${tB2.toFixed(2)}</td><td>${tT.toFixed(2)}</td><td></td><td>${tFn.toFixed(2)}</td><td>${tNp.toFixed(2)}</td><td></td><td></td></tr>`;
   return h+'</tbody></table>';
 }
@@ -1300,9 +1321,9 @@ $('#valXlsxBtn')&&($('#valXlsxBtn').onclick=async()=>{
         .forEach((h,i)=>ws.getCell(hr,i+1).value=h); styleHdr(ws.getRow(hr));
       rows.sort((a,b)=>String(a.name).localeCompare(String(b.name)));
       rows.forEach((r,i)=>{ const rn=hr+1+i, row=ws.getRow(rn);
-        row.getCell(1).value=r.id; row.getCell(2).value=r.name; row.getCell(3).value=r.fileHrs;
+        row.getCell(1).value=r.id; row.getCell(2).value=r.name+(r.snpot?'  (×2 straight NPOT)':''); row.getCell(3).value=r.fileHrs;
         row.getCell(4).value=r.b1; row.getCell(5).value=r.b2; row.getCell(6).value={formula:`D${rn}+E${rn}`};
-        row.getCell(7).value={formula:`F${rn}-C${rn}`}; row.getCell(8).value=r.fileNpot; row.getCell(9).value=r.tsNpot;
+        row.getCell(7).value = r.snpot ? r.diffHrs : {formula:`F${rn}-C${rn}`}; row.getCell(8).value=r.fileNpot; row.getCell(9).value=r.tsNpot;
         row.getCell(10).value={formula:`I${rn}-H${rn}`}; row.getCell(11).value={formula:`IF(AND(G${rn}=0,J${rn}=0),"MATCH","CHECK")`};
         row.eachCell((c,cn)=>{c.font={name:'Arial',size:10}; if(cn>=3){c.alignment={horizontal:'center'}; if(cn<11)c.numFmt=NUMF;}});
         const rc=row.getCell(11); rc.fill=r.result==='MATCH'?GREEN:RED; rc.font={name:'Arial',bold:true,size:10};
@@ -1349,7 +1370,7 @@ $('#valXlsxBtn')&&($('#valXlsxBtn').onclick=async()=>{
         const ws2=wb.addWorksheet(KEY+' HOLIDAY-RESTDAY');
         ws2.getCell('A1').value='HOLIDAY & REST DAY OT VALIDATION — '+co; ws2.getCell('A1').font={name:'Arial',bold:true,size:13,color:{argb:'FF1F4E78'}};
         let row=3;
-        if(rst.length) row=section(ws2,row,'REST DAY OT (Sat/Sun actual dates)','Posting rule: non-night → RSTHRS; night-premium (10PM-6AM) → RSTOT & RSTNPOT. Bucket total = approved OT.',rst,['RSTHRS','RSTOT','RSTNPOT']);
+        if(rst.length) row=section(ws2,row,'REST DAY OT (Sat/Sun actual dates)','Posting rule: non-night → RSTHRS; night-premium (10PM-6AM) → RSTOT & RSTNPOT. Bucket total = approved OT. Rows tagged "×2 straight NPOT" post the full OT to BOTH RSTHRS and RSTOT (expected total = 2× approved).',rst,['RSTHRS','RSTOT','RSTNPOT']);
         if(lgl.length) row=section(ws2,row,'LEGAL HOLIDAY OT — '+holLabel('LGL'),'Posting rule: non-night → LGLHRS; night-premium → LGLHRSOT & LGLNPOT. Bucket total = approved OT.',lgl,['LGLHRS','LGLHRSOT','LGLNPOT']);
         if(spl.length) row=section(ws2,row,'SPECIAL HOLIDAY OT — '+holLabel('SPL'),'Posting rule: non-night → SPLHRS; night-premium → SPLHRSOT & SPLNPOT. Bucket total = approved OT.',spl,['SPLHRS','SPLHRSOT','SPLNPOT']);
         [14,32,16,11,11,18,9,12,11,10,10].forEach((w,i)=>ws2.getColumn(i+1).width=w);
