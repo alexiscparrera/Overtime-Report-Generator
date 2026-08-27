@@ -378,6 +378,7 @@
         <button class="btn-ghost mini" id="holAdd">+ Add holiday</button>
         <span id="holChips" class="holchips"></span>
       </div>
+      <div class="note" style="margin:-4px 0 8px">🌏 <b>Region-specific holidays:</b> just add the date normally — the tool applies it only to employees whose timesheet was actually credited holiday hours (LGL/SPL). Staff in other sites who worked that date stay on regular OT automatically.</div>
       <div class="valctl">
         <button class="btn-primary" id="validateBtn">✓ Validate vs timesheet</button>
         <button class="btn-amber" id="valXlsxBtn" style="display:none">⬇ Validation workbook</button>
@@ -1039,14 +1040,19 @@ function validateCore(recs, tsEmployees, holidays){
     if(r.appstat && !/APPROVED/i.test(String(r.appstat))) return;
     if(r.date && !valParseDate(r.date)) badDates++;
     const straight=/straight\s*npot/i.test(String(r.status||''));
-    let dt=classifyDayType(r.date, holidays);
-    if(straight) dt='RST';   // manual "straight NPOT" -> rest-day; hours post to BOTH RSTHRS and RSTOT (2x), plus RSTNPOT
+    let dt=classifyDayType(r.date, holidays);   // day type follows the DATE (holiday / rest day / regular); "straight NPOT" only affects the bucket math, not the day type
+    if(dt==='LGL'||dt==='SPL'){   // region-specific holiday: only applies to employees the timesheet actually credited holiday hours
+      const idt=String(r.id||'').trim(); const te=tsEmployees&&tsEmployees[idt];
+      const credited = dt==='LGL' ? (te&&((te.LGLHRS||0)+(te.LGLHRSOT||0))>0.01) : (te&&((te.SPLHRS||0)+(te.SPLHRSOT||0))>0.01);
+      if(!credited){ const d=valParseDate(r.date); const w=d?d.getDay():1; dt=(w===0||w===6)?'RST':'REG'; }   // holiday not applicable to this site -> natural day type
+    }
+    const dbl = straight && dt!=='REG';   // straight NPOT posts the OT into BOTH *HRS and *OT for RST/LGL/SPL (2x); REG has a single OT bucket so no doubling
     let id=String(r.id||'').trim(); let blank=false;
     if(!id){ id='BLANK:'+(r.name||''); blank=true; }
     if(!agg[id]) agg[id]={REG:{h:0,hd:0,np:0,n:0,snpot:false},RST:{h:0,hd:0,np:0,n:0,snpot:false},LGL:{h:0,hd:0,np:0,n:0,snpot:false},SPL:{h:0,hd:0,np:0,n:0,snpot:false},name:r.name,blank};
     const hh=valHours(r.hrs), nn=tsNum(r.npot);
-    const cell=agg[id][dt]; cell.h+=hh; cell.hd+=(straight?2*hh:hh); cell.np+=nn; cell.n++; if(straight)cell.snpot=true;
-    entries.push({id:blank?'(blank)':id, name:r.name, date:r.date, hrs:hh, npot:nn, daytype:dt, blank, snpot:straight});
+    const cell=agg[id][dt]; cell.h+=hh; cell.hd+=(dbl?2*hh:hh); cell.np+=nn; cell.n++; if(dbl)cell.snpot=true;
+    entries.push({id:blank?'(blank)':id, name:r.name, date:r.date, hrs:hh, npot:nn, daytype:dt, blank, snpot:dbl});
   });
   const results=[]; const checkIds=new Set();
   const B={REG:['REGHRSOT',null,'REGNPOT'], RST:['RSTHRS','RSTOT','RSTNPOT'], LGL:['LGLHRS','LGLHRSOT','LGLNPOT'], SPL:['SPLHRS','SPLHRSOT','SPLNPOT']};
@@ -1414,7 +1420,7 @@ $('#valXlsxBtn')&&($('#valXlsxBtn').onclick=async()=>{
       rows.forEach(([t,d])=>{ if(d==='none this cut-off.'&&(t==='Special holiday'||t==='Legal holiday'||t==='Rest day (Sat/Sun)')) return;
         ns.getCell(r,1).value=t; ns.getCell(r,1).font={name:'Arial',bold:true,size:10}; ns.getCell(r,2).value=d; ns.getCell(r,2).alignment={wrapText:true,vertical:'top'}; ns.getCell(r,2).font={name:'Arial',size:10}; r++; });
       r++; });
-    [['Method','Outer-join on EMPLOYEE ID, per day type. Tolerance 0.01 hr. Holidays/rest days excluded from the regular SUMMARY and checked on their own sheet.'],
+    [['Method','Outer-join on EMPLOYEE ID, per day type. Tolerance 0.01 hr. Holidays/rest days excluded from the regular SUMMARY and checked on their own sheet. Region-specific holidays apply only to employees whose timesheet was credited LGL/SPL holiday hours; others on that date stay on regular OT.'],
      ['Holidays used', allHolidays().length?allHolidays().map(h=>h.date+':'+h.type+(h.name?' ('+h.name+')':'')+(STATE.holidays.some(m=>m.date===h.date)?'':' [auto]')).join(', '):'none — weekends only as rest days'],
      ['Common CHECK causes','1) OT approved after report generated (add to file). 2) Blank EMPLOYEE ID. 3) Amended approvals vs manual corrections. 4) Timesheet undercredit vs bio logs.']]
      .forEach(([t,d])=>{ ns.getCell(r,1).value=t; ns.getCell(r,1).font={name:'Arial',bold:true,size:10}; ns.getCell(r,2).value=d; ns.getCell(r,2).alignment={wrapText:true,vertical:'top'}; ns.getCell(r,2).font={name:'Arial',size:10}; r++; });
