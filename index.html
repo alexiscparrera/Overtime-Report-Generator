@@ -1029,8 +1029,11 @@ function valParseDate(s){
 function classifyDayType(dateStr, holidays){
   const d=valParseDate(dateStr); if(!d) return 'REG';
   const iso=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-  if(holidays[iso]) return holidays[iso];
-  const dow=d.getDay(); if(dow===0||dow===6) return 'RST';
+  const hol=holidays[iso];                 // 'LGL' | 'SPL' | undefined
+  const weekend=(d.getDay()===0||d.getDay()===6);
+  if(hol && weekend) return hol==='LGL' ? 'RSTLGL' : 'RSTSPL';   // holiday that fell on a rest day -> combined buckets
+  if(hol) return hol;
+  if(weekend) return 'RST';
   return 'REG';
 }
 const VTOL=0.01;
@@ -1041,25 +1044,31 @@ function validateCore(recs, tsEmployees, holidays){
     if(r.date && !valParseDate(r.date)) badDates++;
     const straight=/straight\s*npot/i.test(String(r.status||''));
     let dt=classifyDayType(r.date, holidays);   // day type follows the DATE (holiday / rest day / regular); "straight NPOT" only affects the bucket math, not the day type
-    if(dt==='LGL'||dt==='SPL'){   // region-specific holiday: only applies to employees the timesheet actually credited holiday hours
+    if(dt==='LGL'||dt==='SPL'||dt==='RSTSPL'||dt==='RSTLGL'){   // region-specific holiday: only applies to employees the timesheet actually credited the matching holiday bucket
       const idt=String(r.id||'').trim(); const te=tsEmployees&&tsEmployees[idt];
-      const credited = dt==='LGL' ? (te&&((te.LGLHRS||0)+(te.LGLHRSOT||0))>0.01) : (te&&((te.SPLHRS||0)+(te.SPLHRSOT||0))>0.01);
-      if(!credited){ const d=valParseDate(r.date); const w=d?d.getDay():1; dt=(w===0||w===6)?'RST':'REG'; }   // holiday not applicable to this site -> natural day type
+      let credited=false;
+      if(te){
+        if(dt==='LGL') credited=((te.LGLHRS||0)+(te.LGLHRSOT||0))>0.01;
+        else if(dt==='SPL') credited=((te.SPLHRS||0)+(te.SPLHRSOT||0))>0.01;
+        else if(dt==='RSTSPL') credited=((te.RSTSPLHRS||0)+(te.RSTSPLHRSOT||0)+(te.RSTSPLNPOT||0))>0.01;
+        else if(dt==='RSTLGL') credited=((te.RSTLGLHRS||0)+(te.RSTLGLHRSOT||0)+(te.RSTLGLNPOT||0))>0.01;
+      }
+      if(!credited){ const d=valParseDate(r.date); const w=d?d.getDay():1; dt=(w===0||w===6)?'RST':'REG'; }   // holiday not applicable to this site -> natural day type (rest day if weekend)
     }
-    const dbl = straight && dt!=='REG';   // straight NPOT posts the OT into BOTH *HRS and *OT for RST/LGL/SPL (2x); REG has a single OT bucket so no doubling
+    const dbl = straight && dt!=='REG';   // straight NPOT posts the OT into BOTH *HRS and *OT (2x) for rest-day/holiday families; REG has a single OT bucket so no doubling
     let id=String(r.id||'').trim(); let blank=false;
     if(!id){ id='BLANK:'+(r.name||''); blank=true; }
-    if(!agg[id]) agg[id]={REG:{h:0,hd:0,np:0,n:0,snpot:false},RST:{h:0,hd:0,np:0,n:0,snpot:false},LGL:{h:0,hd:0,np:0,n:0,snpot:false},SPL:{h:0,hd:0,np:0,n:0,snpot:false},name:r.name,blank};
+    if(!agg[id]) agg[id]={REG:{h:0,hd:0,np:0,n:0,snpot:false},RST:{h:0,hd:0,np:0,n:0,snpot:false},LGL:{h:0,hd:0,np:0,n:0,snpot:false},SPL:{h:0,hd:0,np:0,n:0,snpot:false},RSTSPL:{h:0,hd:0,np:0,n:0,snpot:false},RSTLGL:{h:0,hd:0,np:0,n:0,snpot:false},name:r.name,blank};
     const hh=valHours(r.hrs), nn=tsNum(r.npot);
     const cell=agg[id][dt]; cell.h+=hh; cell.hd+=(dbl?2*hh:hh); cell.np+=nn; cell.n++; if(dbl)cell.snpot=true;
     entries.push({id:blank?'(blank)':id, name:r.name, date:r.date, hrs:hh, npot:nn, daytype:dt, blank, snpot:dbl});
   });
   const results=[]; const checkIds=new Set();
-  const B={REG:['REGHRSOT',null,'REGNPOT'], RST:['RSTHRS','RSTOT','RSTNPOT'], LGL:['LGLHRS','LGLHRSOT','LGLNPOT'], SPL:['SPLHRS','SPLHRSOT','SPLNPOT']};
+  const B={REG:['REGHRSOT',null,'REGNPOT'], RST:['RSTHRS','RSTOT','RSTNPOT'], LGL:['LGLHRS','LGLHRSOT','LGLNPOT'], SPL:['SPLHRS','SPLHRSOT','SPLNPOT'], RSTSPL:['RSTSPLHRS','RSTSPLHRSOT','RSTSPLNPOT'], RSTLGL:['RSTLGLHRS','RSTLGLHRSOT','RSTLGLNPOT']};
   const ids=new Set([...Object.keys(agg), ...Object.keys(tsEmployees||{})]);
   ids.forEach(id=>{
     const a=agg[id]; const t=(tsEmployees&&tsEmployees[id])||{};
-    ['REG','RST','LGL','SPL'].forEach(dt=>{
+    ['REG','RST','LGL','SPL','RSTSPL','RSTLGL'].forEach(dt=>{
       const fh=a?a[dt].h:0, fhd=a?a[dt].hd:0, fnp=a?a[dt].np:0, fn=a?a[dt].n:0, snpot=a?a[dt].snpot:false;
       let th,tnp,b1=0,b2=0;
       if(dt==='REG'){ b1=t.REGHRSOT||0; th=b1; tnp=t.REGNPOT||0; }
@@ -1089,7 +1098,7 @@ async function parseTimesheet(file){
   const ws=wb.Sheets[wb.SheetNames[0]];
   const M=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
   let period=''; for(let i=0;i<Math.min(M.length,8);i++){ const j=(M[i]||[]).join(' '); if(/PAYROLL PERIOD/i.test(j)){ period=j.replace(/\s+/g,' ').trim(); break; } }
-  const want=['REGHRS','REGHRSOT','REGNP','REGNPOT','RSTHRS','RSTOT','RSTNP','RSTNPOT','SPLHRS','SPLHRSOT','SPLNP','SPLNPOT','LGLHRS','LGLHRSOT','LGLNP','LGLNPOT'];
+  const want=['REGHRS','REGHRSOT','REGNP','REGNPOT','RSTHRS','RSTOT','RSTNP','RSTNPOT','SPLHRS','SPLHRSOT','SPLNP','SPLNPOT','LGLHRS','LGLHRSOT','LGLNP','LGLNPOT','RSTSPLHRS','RSTSPLHRSOT','RSTSPLNPOT','RSTLGLHRS','RSTLGLHRSOT','RSTLGLNPOT'];
   const nk=s=>String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9]/g,'');
   let hrow=-1, colmap={};
   for(let i=0;i<Math.min(M.length,12);i++){
@@ -1097,7 +1106,7 @@ async function parseTimesheet(file){
     row.forEach((c,ci)=>{ const k=nk(c); if(want.includes(k) && map[k]===undefined){ map[k]=ci; hits++; } });
     if(hits>=4){ hrow=i; colmap=map; break; }
   }
-  const IDX={REGHRS:7,REGHRSOT:8,REGNP:9,REGNPOT:10,RSTHRS:11,RSTOT:12,RSTNP:13,RSTNPOT:14,SPLHRS:15,SPLHRSOT:16,SPLNP:17,SPLNPOT:18,LGLHRS:19,LGLHRSOT:20,LGLNP:21,LGLNPOT:22};
+  const IDX={REGHRS:7,REGHRSOT:8,REGNP:9,REGNPOT:10,RSTHRS:11,RSTOT:12,RSTNP:13,RSTNPOT:14,SPLHRS:15,SPLHRSOT:16,SPLNP:17,SPLNPOT:18,LGLHRS:19,LGLHRSOT:20,LGLNP:21,LGLNPOT:22,RSTSPLHRS:27,RSTSPLHRSOT:28,RSTSPLNPOT:30,RSTLGLHRS:31,RSTLGLHRSOT:32,RSTLGLNPOT:34};
   const col=k=> (colmap[k]!==undefined?colmap[k]:IDX[k]);
   let idCol=2,lastCol=3,firstCol=4;
   if(hrow>=0){ (M[hrow]||[]).forEach((c,ci)=>{ const k=nk(c); if(k==='IDNO'||k==='IDNUMBER'||k==='EMPLOYEEID')idCol=ci; if(k==='LASTNAME')lastCol=ci; if(k==='FIRSTNAME')firstCol=ci; }); }
@@ -1111,7 +1120,9 @@ async function parseTimesheet(file){
     const num=k=>tsNum(row[col(k)]);
     employees[id]={ name:last+', '+String(row[firstCol]==null?'':row[firstCol]).trim(),
       REGHRSOT:num('REGHRSOT'),REGNPOT:num('REGNPOT'),RSTHRS:num('RSTHRS'),RSTOT:num('RSTOT'),RSTNPOT:num('RSTNPOT'),
-      LGLHRS:num('LGLHRS'),LGLHRSOT:num('LGLHRSOT'),LGLNPOT:num('LGLNPOT'),SPLHRS:num('SPLHRS'),SPLHRSOT:num('SPLHRSOT'),SPLNPOT:num('SPLNPOT') };
+      LGLHRS:num('LGLHRS'),LGLHRSOT:num('LGLHRSOT'),LGLNPOT:num('LGLNPOT'),SPLHRS:num('SPLHRS'),SPLHRSOT:num('SPLHRSOT'),SPLNPOT:num('SPLNPOT'),
+      RSTSPLHRS:num('RSTSPLHRS'),RSTSPLHRSOT:num('RSTSPLHRSOT'),RSTSPLNPOT:num('RSTSPLNPOT'),
+      RSTLGLHRS:num('RSTLGLHRS'),RSTLGLHRSOT:num('RSTLGLHRSOT'),RSTLGLNPOT:num('RSTLGLNPOT') };
   }
   return {period, employees, count:Object.keys(employees).length, headerVerified:hrow>=0};
 }
@@ -1252,10 +1263,13 @@ function renderValPanel(companies, anyCheck){
       html+=vRegTable(v.results.filter(r=>r.daytype==='REG'));
     } else {
       const rst=v.results.filter(r=>r.daytype==='RST'), lgl=v.results.filter(r=>r.daytype==='LGL'), spl=v.results.filter(r=>r.daytype==='SPL');
-      if(!rst.length&&!lgl.length&&!spl.length) html+='<div class="valmeta">No rest day or holiday OT this cut-off.</div>';
+      const rstspl=v.results.filter(r=>r.daytype==='RSTSPL'), rstlgl=v.results.filter(r=>r.daytype==='RSTLGL');
+      if(!rst.length&&!lgl.length&&!spl.length&&!rstspl.length&&!rstlgl.length) html+='<div class="valmeta">No rest day or holiday OT this cut-off.</div>';
       if(rst.length) html+=vHolSection('REST DAY OT (Sat/Sun)', rst, ['RSTHRS','RSTOT','RSTNPOT']);
       if(lgl.length) html+=vHolSection('LEGAL HOLIDAY OT'+(holLabel('LGL')?' — '+holLabel('LGL'):''), lgl, ['LGLHRS','LGLHRSOT','LGLNPOT']);
       if(spl.length) html+=vHolSection('SPECIAL HOLIDAY OT'+(holLabel('SPL')?' — '+holLabel('SPL'):''), spl, ['SPLHRS','SPLHRSOT','SPLNPOT']);
+      if(rstspl.length) html+=vHolSection('REST DAY + SPECIAL HOLIDAY OT'+(holLabel('SPL')?' — '+holLabel('SPL'):''), rstspl, ['RSTSPLHRS','RSTSPLHRSOT','RSTSPLNPOT']);
+      if(rstlgl.length) html+=vHolSection('REST DAY + LEGAL HOLIDAY OT'+(holLabel('LGL')?' — '+holLabel('LGL'):''), rstlgl, ['RSTLGLHRS','RSTLGLHRSOT','RSTLGLNPOT']);
     }
   });
   p.innerHTML=html;
@@ -1349,6 +1363,8 @@ $('#valXlsxBtn')&&($('#valXlsxBtn').onclick=async()=>{
       const rst=v.results.filter(r=>r.daytype==='RST');
       const lgl=v.results.filter(r=>r.daytype==='LGL');
       const spl=v.results.filter(r=>r.daytype==='SPL');
+      const rstspl=v.results.filter(r=>r.daytype==='RSTSPL');
+      const rstlgl=v.results.filter(r=>r.daytype==='RSTLGL');
 
       // ---- SUMMARY (regular days only) ----
       const ws=wb.addWorksheet(KEY+' SUMMARY');
@@ -1372,14 +1388,16 @@ $('#valXlsxBtn')&&($('#valXlsxBtn').onclick=async()=>{
       [14,34,10,18,20,9,12,20,10,10].forEach((w,i)=>ws.getColumn(i+1).width=w); ws.views=[{state:'frozen',ySplit:4}];
 
       // ---- HOLIDAY-RESTDAY ----
-      if(rst.length||lgl.length||spl.length){
+      if(rst.length||lgl.length||spl.length||rstspl.length||rstlgl.length){
         const ws2=wb.addWorksheet(KEY+' HOLIDAY-RESTDAY');
         ws2.getCell('A1').value='HOLIDAY & REST DAY OT VALIDATION — '+co; ws2.getCell('A1').font={name:'Arial',bold:true,size:13,color:{argb:'FF1F4E78'}};
         let row=3;
         if(rst.length) row=section(ws2,row,'REST DAY OT (Sat/Sun actual dates)','Posting rule: non-night → RSTHRS; night-premium (10PM-6AM) → RSTOT & RSTNPOT. Bucket total = approved OT. Rows tagged "×2 straight NPOT" post the full OT to BOTH RSTHRS and RSTOT (expected total = 2× approved).',rst,['RSTHRS','RSTOT','RSTNPOT']);
         if(lgl.length) row=section(ws2,row,'LEGAL HOLIDAY OT — '+holLabel('LGL'),'Posting rule: non-night → LGLHRS; night-premium → LGLHRSOT & LGLNPOT. Bucket total = approved OT.',lgl,['LGLHRS','LGLHRSOT','LGLNPOT']);
         if(spl.length) row=section(ws2,row,'SPECIAL HOLIDAY OT — '+holLabel('SPL'),'Posting rule: non-night → SPLHRS; night-premium → SPLHRSOT & SPLNPOT. Bucket total = approved OT.',spl,['SPLHRS','SPLHRSOT','SPLNPOT']);
-        [14,32,16,11,11,18,9,12,11,10,10].forEach((w,i)=>ws2.getColumn(i+1).width=w);
+        if(rstspl.length) row=section(ws2,row,'REST DAY + SPECIAL HOLIDAY OT — '+holLabel('SPL'),'Holiday that fell on a rest day → posts to the combined RESTDAY-SPECIAL-HOLIDAY buckets. non-night → RSTSPLHRS; night-premium → RSTSPLHRSOT & RSTSPLNPOT. Bucket total = approved OT.',rstspl,['RSTSPLHRS','RSTSPLHRSOT','RSTSPLNPOT']);
+        if(rstlgl.length) row=section(ws2,row,'REST DAY + LEGAL HOLIDAY OT — '+holLabel('LGL'),'Holiday that fell on a rest day → posts to the combined RESTDAY-LEGAL-HOLIDAY buckets. non-night → RSTLGLHRS; night-premium → RSTLGLHRSOT & RSTLGLNPOT. Bucket total = approved OT.',rstlgl,['RSTLGLHRS','RSTLGLHRSOT','RSTLGLNPOT']);
+        [14,32,16,12,13,20,9,12,13,10,10].forEach((w,i)=>ws2.getColumn(i+1).width=w);
       }
 
       // ---- EXCLUDED (non-regular entries pulled from the regular SUMMARY) ----
@@ -1390,8 +1408,8 @@ $('#valXlsxBtn')&&($('#valXlsxBtn').onclick=async()=>{
         ['EMPLOYEE ID','NAME','ACTUAL DATE','APPROVED OT','NPOT','EXCLUSION REASON','POSTS TO (TIMESHEET BUCKET)']
           .forEach((h,i)=>ws3.getCell(3,i+1).value=h); styleHdr(ws3.getRow(3));
         exEntries.sort((a,b)=>String(a.daytype).localeCompare(String(b.daytype))||String(a.name).localeCompare(String(b.name)));
-        const REASON={RST:'REST DAY',LGL:'LEGAL HOLIDAY'+(holLabel('LGL')?' ('+holLabel('LGL')+')':''),SPL:'SPECIAL HOLIDAY'+(holLabel('SPL')?' ('+holLabel('SPL')+')':'')};
-        const POSTS={RST:'RSTHRS / RSTOT / RSTNPOT',LGL:'LGLHRS / LGLHRSOT / LGLNPOT',SPL:'SPLHRS / SPLHRSOT / SPLNPOT'};
+        const REASON={RST:'REST DAY',LGL:'LEGAL HOLIDAY'+(holLabel('LGL')?' ('+holLabel('LGL')+')':''),SPL:'SPECIAL HOLIDAY'+(holLabel('SPL')?' ('+holLabel('SPL')+')':''),RSTSPL:'REST DAY + SPECIAL HOLIDAY'+(holLabel('SPL')?' ('+holLabel('SPL')+')':''),RSTLGL:'REST DAY + LEGAL HOLIDAY'+(holLabel('LGL')?' ('+holLabel('LGL')+')':'')};
+        const POSTS={RST:'RSTHRS / RSTOT / RSTNPOT',LGL:'LGLHRS / LGLHRSOT / LGLNPOT',SPL:'SPLHRS / SPLHRSOT / SPLNPOT',RSTSPL:'RSTSPLHRS / RSTSPLHRSOT / RSTSPLNPOT',RSTLGL:'RSTLGLHRS / RSTLGLHRSOT / RSTLGLNPOT'};
         exEntries.forEach((e,i)=>{ const rn=4+i, row=ws3.getRow(rn);
           row.getCell(1).value=e.id; row.getCell(2).value=e.name;
           row.getCell(3).value=String(e.date)+(vDow(e.date)?' ('+vDow(e.date)+')':'');
@@ -1408,7 +1426,9 @@ $('#valXlsxBtn')&&($('#valXlsxBtn').onclick=async()=>{
         ['Regular days', vVerdict(reg)],
         ['Rest day (Sat/Sun)', vVerdict(rst)],
         ['Legal holiday', vVerdict(lgl)],
-        ['Special holiday', vVerdict(spl)]
+        ['Special holiday', vVerdict(spl)],
+        ['Rest day + special holiday', vVerdict(rstspl)],
+        ['Rest day + legal holiday', vVerdict(rstlgl)]
       ]]);
     });
 
@@ -1417,7 +1437,7 @@ $('#valXlsxBtn')&&($('#valXlsxBtn').onclick=async()=>{
     ns.getCell('A1').value='NOTES — OT VALIDATION'+(periodCode?', PERIOD '+periodCode:''); ns.getCell('A1').font={name:'Arial',bold:true,size:12,color:{argb:'FF1F4E78'}};
     let r=3;
     notesBlocks.forEach(([title,rows])=>{ ns.getCell(r,1).value=title; ns.getCell(r,1).font={name:'Arial',bold:true,size:11,color:{argb:'FF1F4E78'}}; r++;
-      rows.forEach(([t,d])=>{ if(d==='none this cut-off.'&&(t==='Special holiday'||t==='Legal holiday'||t==='Rest day (Sat/Sun)')) return;
+      rows.forEach(([t,d])=>{ if(d==='none this cut-off.'&&t!=='Regular days'&&t!=='Scope') return;
         ns.getCell(r,1).value=t; ns.getCell(r,1).font={name:'Arial',bold:true,size:10}; ns.getCell(r,2).value=d; ns.getCell(r,2).alignment={wrapText:true,vertical:'top'}; ns.getCell(r,2).font={name:'Arial',size:10}; r++; });
       r++; });
     [['Method','Outer-join on EMPLOYEE ID, per day type. Tolerance 0.01 hr. Holidays/rest days excluded from the regular SUMMARY and checked on their own sheet. Region-specific holidays apply only to employees whose timesheet was credited LGL/SPL holiday hours; others on that date stay on regular OT.'],
